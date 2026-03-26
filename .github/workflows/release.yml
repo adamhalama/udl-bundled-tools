@@ -1,0 +1,85 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "scdl-v*"
+
+jobs:
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            goarch: amd64
+          - runner: macos-14
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      SCDL_VERSION: 3.0.1
+      PYTHON_VERSION: "3.11"
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build bundled scdl binary
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install "scdl==${SCDL_VERSION}" "pyinstaller>=6.0.0"
+          python packaging/patch_scdl.py
+          pyinstaller \
+            --onefile \
+            --name "scdl-darwin-${GOARCH}" \
+            --collect-all scdl \
+            --collect-all yt_dlp \
+            packaging/scdl_entry.py
+          ./dist/"scdl-darwin-${GOARCH}" --version | tee version.txt
+          grep -qx "${SCDL_VERSION}" version.txt
+          shasum -a 256 "./dist/scdl-darwin-${GOARCH}" | awk '{print $1 "  " $2}' > "./dist/scdl-darwin-${GOARCH}.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goarch }}
+          path: |
+            dist/scdl-darwin-${{ matrix.goarch }}
+            dist/scdl-darwin-${{ matrix.goarch }}.sha256
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: build-macos
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact layout
+        run: |
+          find dist -mindepth 2 -type f -print0 | while IFS= read -r -d '' file; do
+            cp "$file" "dist/$(basename "$file")"
+          done
+
+      - name: Build SHA256SUMS
+        run: |
+          cat dist/*.sha256 > dist/SHA256SUMS
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/scdl-darwin-amd64
+            dist/scdl-darwin-arm64
+            dist/SHA256SUMS
